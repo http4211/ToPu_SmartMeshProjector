@@ -25,10 +25,9 @@ from bpy.props import IntVectorProperty
 
 # === グローバル一時保持 ===
 highlight_locked = False
-cached_edit_object = None
-cached_edit_coords = []  # ピボット用
-cached_edit_verts_indices = []  # 投影対象用
-cached_object_name = ""
+cached_edit_objects = []
+cached_edit_coords = {}  # 各オブジェクト名に対応する座標リスト
+cached_edit_verts_indices = {}  # 各オブジェクト名に対応する頂点インデックス
 cached_normal_matrix = None
 gizmo_handler = None
 gizmo_showing = False
@@ -442,41 +441,41 @@ def draw_gizmo_help_text():
 
 def update_highlight_batches():
     global vertex_batch, edge_batch, face_batch
-    global cached_edit_object, cached_edit_verts_indices
 
-    obj = cached_edit_object
-    if not obj or obj.type != 'MESH':
-        vertex_batch = edge_batch = face_batch = None
-        return
-    
-
-    # オブジェクトモードでも使えるように bmesh ではなく obj.data から直接
-    mesh = obj.data
-    verts = mesh.vertices
-    edges = mesh.edges
-    polys = mesh.polygons
-
-    vertex_coords = [
-        tuple(obj.matrix_world @ verts[i].co)
-        for i in cached_edit_verts_indices if i < len(verts)
-    ]
-
+    vertex_coords = []
     edge_coords = []
-    for e in edges:
-        if e.vertices[0] in cached_edit_verts_indices and e.vertices[1] in cached_edit_verts_indices:
-            edge_coords.extend([
-                tuple(obj.matrix_world @ verts[e.vertices[0]].co),
-                tuple(obj.matrix_world @ verts[e.vertices[1]].co),
-            ])
-
     face_coords = []
-    for f in polys:
-        if all(i in cached_edit_verts_indices for i in f.vertices) and len(f.vertices) >= 3:
-            base = obj.matrix_world @ verts[f.vertices[0]].co
-            for i in range(1, len(f.vertices) - 1):
-                v1 = obj.matrix_world @ verts[f.vertices[i]].co
-                v2 = obj.matrix_world @ verts[f.vertices[i + 1]].co
-                face_coords.extend([tuple(base), tuple(v1), tuple(v2)])
+
+    for obj in cached_edit_objects:
+        if obj.type != 'MESH':
+            continue
+
+        mesh = obj.data
+        verts = mesh.vertices
+        edges = mesh.edges
+        polys = mesh.polygons
+
+        indices = cached_edit_verts_indices.get(obj.name, [])
+
+        vertex_coords.extend([
+            tuple(obj.matrix_world @ verts[i].co)
+            for i in indices if i < len(verts)
+        ])
+
+        for e in edges:
+            if e.vertices[0] in indices and e.vertices[1] in indices:
+                edge_coords.extend([
+                    tuple(obj.matrix_world @ verts[e.vertices[0]].co),
+                    tuple(obj.matrix_world @ verts[e.vertices[1]].co),
+                ])
+
+        for f in polys:
+            if all(i in indices for i in f.vertices) and len(f.vertices) >= 3:
+                base = obj.matrix_world @ verts[f.vertices[0]].co
+                for i in range(1, len(f.vertices) - 1):
+                    v1 = obj.matrix_world @ verts[f.vertices[i]].co
+                    v2 = obj.matrix_world @ verts[f.vertices[i + 1]].co
+                    face_coords.extend([tuple(base), tuple(v1), tuple(v2)])
 
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     vertex_batch = batch_for_shader(shader, 'POINTS', {"pos": vertex_coords}) if vertex_coords else None
@@ -485,11 +484,12 @@ def update_highlight_batches():
 
 
 
+
 def draw_highlight_overlay():
     global vertex_batch, edge_batch, face_batch
 
     context = bpy.context
-    if not cached_edit_object:
+    if not cached_edit_objects:
         return
 
     update_highlight_batches()
@@ -583,10 +583,15 @@ def get_orientation_matrix(context, obj):
 # === ピボット位置（ギズモ中心） ===
 def get_pivot_location(context, obj):
     global cached_edit_coords
-    if cached_edit_coords:
-        avg = sum(cached_edit_coords, Vector()) / len(cached_edit_coords)
-        return obj.matrix_world @ avg
+
+    if cached_edit_coords and obj.name in cached_edit_coords:
+        coords = cached_edit_coords[obj.name]
+        if coords:
+            avg = sum(coords, Vector()) / len(coords)
+            return obj.matrix_world @ avg
+
     return obj.matrix_world.translation
+
 
 
 def calculate_constant_length_3d(context, region, rv3d, origin, pixel_length=80):
@@ -694,11 +699,12 @@ def check_axis_hover(context, event, region=None, rv3d=None):
         return
 
 
-    obj = cached_edit_object if cached_edit_object else context.active_object
+    obj = cached_edit_objects if cached_edit_objects else context.active_object
     if not obj:
         hover_axis = None
         return
 
+    obj = cached_edit_objects[0] if cached_edit_objects else context.active_object
     origin = get_pivot_location(context, obj)
     scale = calculate_constant_length_3d(context, region, rv3d, origin, pixel_length=80)
     basis = temp_gizmo_orientation_matrix if temp_gizmo_orientation_matrix else get_orientation_matrix(context, obj)
@@ -743,7 +749,7 @@ def check_axis_hover(context, event, region=None, rv3d=None):
 def draw_translate_gizmo():
     global hover_axis
     context = bpy.context
-    obj = cached_edit_object if cached_edit_object else context.active_object
+    obj = cached_edit_objects[0] if cached_edit_objects else context.active_object
     if not obj:
         return
 
@@ -767,6 +773,7 @@ def draw_translate_gizmo():
         return
 
 
+    obj = cached_edit_objects[0] if cached_edit_objects else context.active_object
     origin = get_pivot_location(context, obj)
 
     # ✅ ビュー距離に応じたスケール：ピクセル80に相当する3D長さ
@@ -824,26 +831,18 @@ class ModalMeshProjectorOperator(bpy.types.Operator):
 
     def invoke(self, context, event=None):
         global gizmo_handler, gizmo_showing, mouse_tracker_running
-        global cached_edit_object, cached_edit_coords, cached_edit_verts_indices, cached_object_name
+        global cached_edit_objects, cached_edit_coords, cached_edit_verts_indices
         global cached_normal_matrix
         global highlight_handle, help_text_handle
+        global temp_gizmo_orientation_matrix
+        
         self.custom_orientation_name = ""
         self.temp_orientation_matrix = None
 
         self.prev_orientation = context.scene.transform_orientation_slots[0].type
-        if self.custom_orientation_name:
-            try:
-                slot = context.scene.transform_orientation_slots[0]
-                if slot.custom_orientation and slot.custom_orientation.name == "TempSnap":
-                    bpy.ops.transform.delete_orientation()
-            except Exception:
-                pass
-        self.custom_orientation_name = ""
-
 
         area = context.area
         if not area or area.type != 'VIEW_3D':
-            # context.area が無効な場合、VIEW_3D を探す
             for a in context.window.screen.areas:
                 if a.type == 'VIEW_3D':
                     area = a
@@ -861,7 +860,7 @@ class ModalMeshProjectorOperator(bpy.types.Operator):
             self.report({'ERROR'}, "3Dビューのリージョンが見つかりません")
             return {'CANCELLED'}
 
-        # === 描画ハンドラ登録 ===
+        # 描画ハンドラ登録
         if not highlight_handle:
             highlight_handle = bpy.types.SpaceView3D.draw_handler_add(draw_highlight_overlay, (), 'WINDOW', 'POST_VIEW')
         if not gizmo_handler:
@@ -869,53 +868,50 @@ class ModalMeshProjectorOperator(bpy.types.Operator):
         if not help_text_handle:
             help_text_handle = bpy.types.SpaceView3D.draw_handler_add(draw_gizmo_help_text, (), 'WINDOW', 'POST_PIXEL')
 
-        # === 選択情報キャッシュ ===
-        cached_edit_object = context.edit_object
-        cached_edit_coords = []
-        cached_edit_verts_indices = []
-        cached_object_name = cached_edit_object.name if cached_edit_object else ""
+        # 編集オブジェクト取得（ここが最重要！）
+        cached_edit_objects = [
+            o for o in context.view_layer.objects
+            if o.select_get() and o.mode == 'EDIT' and o.type == 'MESH'
+        ]
+
+        if not cached_edit_objects:
+            self.report({'WARNING'}, "編集モード中のメッシュが選択されていません")
+            return {'CANCELLED'}
+
+        cached_edit_coords = {}
+        cached_edit_verts_indices = {}
+
+        for obj in cached_edit_objects:
+            bm = bmesh.from_edit_mesh(obj.data)
+            bm.verts.ensure_lookup_table()
+            cached_edit_coords[obj.name] = [v.co.copy() for v in bm.verts if v.select]
+            cached_edit_verts_indices[obj.name] = [i for i, v in enumerate(bm.verts) if v.select]
+
         cached_normal_matrix = None
-
-        if cached_edit_object and cached_edit_object.mode == 'EDIT':
-            bpy.ops.object.mode_set(mode='OBJECT')
-            bpy.ops.object.mode_set(mode='EDIT')
-
-            bm = bmesh.from_edit_mesh(cached_edit_object.data)
-            cached_edit_coords = [v.co.copy() for v in bm.verts if v.select]
-            cached_edit_verts_indices = [i for i, v in enumerate(bm.verts) if v.select]
-
-            selected_faces = [f for f in bm.faces if f.select]
-            if selected_faces:
-                normal_local = selected_faces[0].normal.copy()
-                local_matrix = normal_local.to_track_quat('Z', 'Y').to_matrix()
-                cached_normal_matrix = local_matrix
 
         update_highlight_batches()
 
-        # ギズモの回転軸を現在のトランスフォーム座標系から初期化
+        # ギズモの回転軸を初期化
         obj = context.active_object
-        global temp_gizmo_orientation_matrix
         if obj:
-            temp_gizmo_orientation_matrix = get_orientation_matrix(context, obj)
-            #print("[INFO] ギズモマトリクスをトランスフォーム座標系から初期化")
+            temp_gizmo_orientation_matrix = get_orientation_matrix(context, cached_edit_objects[0]) if cached_edit_objects else Matrix.Identity(3)
 
         gizmo_showing = True
         context.window_manager.modal_handler_add(self)
 
         register_snap_draw_handler(context.area)
-        # ★ 安全なトラッカー起動（タイマー遅延）
+
         def trigger_tracker():
             try:
                 bpy.ops.wm.modal_mouse_tracker('INVOKE_DEFAULT')
             except Exception as e:
                 print("トラッカー起動エラー:", e)
-            return None  # 一度だけ実行
+            return None
 
         bpy.app.timers.register(trigger_tracker, first_interval=0.01)
-   
-                    
 
         return {'RUNNING_MODAL'}
+
 
 
 
@@ -1070,16 +1066,57 @@ class ModalMeshProjectorOperator(bpy.types.Operator):
         gizmo_showing = False
         highlight_locked = False
 
+def cast_ray_multiple_directions(bvh, origin, direction, offset_distance=0.01, angle=math.radians(0)):
+    # 中央のレイをまずチェック
+    hit = bvh.ray_cast(origin, direction)
+    if hit and hit[0]:
+        return hit
+
+    # 中央の逆方向
+    hit = bvh.ray_cast(origin, -direction)
+    if hit and hit[0]:
+        return hit
+
+    # 角度をつけて周囲に複数発射（ここで「甘い」判定を実現）
+    axes = [Vector((1,0,0)), Vector((0,1,0)), Vector((0,0,1))]
+    for axis in axes:
+        for sign in (-1, 1):
+            rot_axis = direction.cross(axis).normalized()
+            if rot_axis.length < 0.001:
+                continue  # 軸が同じ場合はスキップ
+            rot_mat = Matrix.Rotation(angle * sign, 4, rot_axis)
+            rotated_dir = (rot_mat @ direction).normalized()
+            hit = bvh.ray_cast(origin, rotated_dir)
+            if hit and hit[0]:
+                return hit
+            # 逆方向
+            hit = bvh.ray_cast(origin, -rotated_dir)
+            if hit and hit[0]:
+                return hit
+
+    # オフセットした位置からの追加レイ
+    offsets = [
+        direction.orthogonal().normalized() * offset_distance,
+        -direction.orthogonal().normalized() * offset_distance
+    ]
+    for offset in offsets:
+        offset_origin = origin + offset
+        hit = bvh.ray_cast(offset_origin, direction)
+        if hit and hit[0]:
+            return hit
+        hit = bvh.ray_cast(offset_origin, -direction)
+        if hit and hit[0]:
+            return hit
+
+    return None  # すべて外れた場合
 
 
 
 # === 投影処理 ===
 def project_mesh(context, axis):
-    global cached_edit_object, cached_edit_coords, cached_edit_verts_indices, cached_object_name
-    
+    global cached_edit_coords, cached_edit_verts_indices
 
-    source = bpy.data.objects.get(cached_object_name)
-    if not source or source.type != 'MESH':
+    if not cached_edit_objects:
         return {'CANCELLED'}
 
     was_active = context.view_layer.objects.active
@@ -1092,18 +1129,12 @@ def project_mesh(context, axis):
         obj for obj in context.view_layer.objects
         if obj.type == 'MESH' and (
             obj.select_get() or obj.mode == 'EDIT'
-        ) and (
-            obj != source or (obj == source and obj.mode == 'EDIT')
         )
     ]
 
     for target in target_objs:
         #print(f"🎯 ターゲット: {target.name}（モード: {target.mode}）")
         try:
-            if target == source and target.mode != 'EDIT':
-                #print(f"⚠ {target.name} はソースと同一で、編集モードではないためスキップ")
-                continue
-
             if target.mode == 'EDIT':
                 #print("🔧 編集モードターゲット → 選択面から一時オブジェクト作成")
 
@@ -1180,31 +1211,47 @@ def project_mesh(context, axis):
         return {'CANCELLED'}
 
     # === 投影元の頂点を更新（キャッシュ済みの選択頂点） ===
-    context.view_layer.objects.active = source
-    source.select_set(True)
-    bpy.ops.object.mode_set(mode='EDIT')
-
-    bm = bmesh.from_edit_mesh(source.data)
-    bm.verts.ensure_lookup_table()
-
     direction_map = {'X': Vector((1, 0, 0)), 'Y': Vector((0, 1, 0)), 'Z': Vector((0, 0, 1))}
     global temp_gizmo_orientation_matrix
-    basis = temp_gizmo_orientation_matrix if temp_gizmo_orientation_matrix else get_orientation_matrix(context, source)
-    direction = basis @ direction_map[axis]
 
-    for idx in cached_edit_verts_indices:
-        if idx < len(bm.verts):
-            v = bm.verts[idx]
-            origin = source.matrix_world @ v.co
-            for bvh in all_bvhs:
-                hit = bvh.ray_cast(origin, direction.normalized())
-                if not hit or not hit[0]:
-                    hit = bvh.ray_cast(origin, -direction.normalized())
-                if hit and hit[0]:
-                    v.co = source.matrix_world.inverted() @ hit[0]
-                    break
+    for source in cached_edit_objects:
+        indices = cached_edit_verts_indices.get(source.name, [])
+        if not indices:
+            continue
 
-    bmesh.update_edit_mesh(source.data)
+        context.view_layer.objects.active = source
+        source.select_set(True)
+        bpy.ops.object.mode_set(mode='EDIT')
+
+        bm = bmesh.from_edit_mesh(source.data)
+        bm.verts.ensure_lookup_table()
+
+        basis = temp_gizmo_orientation_matrix if temp_gizmo_orientation_matrix else get_orientation_matrix(context, source)
+        direction = basis @ direction_map[axis]
+
+        for idx in indices:
+            if idx < len(bm.verts):
+                v = bm.verts[idx]
+                origin_world = source.matrix_world @ v.co
+                found_hit = None
+
+                for bvh in all_bvhs:
+                    # 現状のまま複数方向からrayを飛ばしてヒット判定
+                    found_hit = cast_ray_multiple_directions(bvh, origin_world, direction.normalized())
+                    if found_hit and found_hit[0]:
+                        hit_point = found_hit[0]
+
+                        # ✅ 修正箇所：移動方向を軸方向だけに制限
+                        to_hit_vec = hit_point - origin_world
+                        projection_length = to_hit_vec.dot(direction.normalized())
+                        new_pos_world = origin_world + direction.normalized() * projection_length
+
+                        v.co = source.matrix_world.inverted() @ new_pos_world
+                        break  # 最初に当たったら終了
+
+        bmesh.update_edit_mesh(source.data)
+
+
 
     # === 選択状態の復元 ===
     bpy.ops.object.mode_set(mode='OBJECT')
@@ -1214,15 +1261,21 @@ def project_mesh(context, axis):
     context.view_layer.objects.active = was_active
 
     # ✅ プロジェクション完了後に新たな編集モード状態をキャッシュし直す
-    cached_edit_object = bpy.context.edit_object
-    cached_object_name = cached_edit_object.name if cached_edit_object else ""
-    cached_edit_coords = []
-    cached_edit_verts_indices = []
+    cached_edit_coords = {}
+    cached_edit_verts_indices = {}
 
-    if cached_edit_object and cached_edit_object.mode == 'EDIT':
-        bm = bmesh.from_edit_mesh(cached_edit_object.data)
-        cached_edit_coords = [v.co.copy() for v in bm.verts if v.select]
-        cached_edit_verts_indices = [i for i, v in enumerate(bm.verts) if v.select]
+    for obj in cached_edit_objects:
+        context.view_layer.objects.active = obj
+        obj.select_set(True)
+        bpy.ops.object.mode_set(mode='EDIT')  # ← 明示的にEDITモードに戻す
+
+        bm = bmesh.from_edit_mesh(obj.data)
+        bm.verts.ensure_lookup_table()
+        cached_edit_coords[obj.name] = [v.co.copy() for v in bm.verts if v.select]
+        cached_edit_verts_indices[obj.name] = [i for i, v in enumerate(bm.verts) if v.select]
+
+    # 最後にモードを戻す（任意で追加）
+    bpy.ops.object.mode_set(mode='OBJECT')
 
     update_highlight_batches()
 
