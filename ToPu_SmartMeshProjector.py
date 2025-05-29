@@ -108,7 +108,7 @@ snap_draw_state = SnapDrawState()
 snap_draw_handler = None
 
 def compute_orientation_matrix_from_snap(context):
-    print("compute_orientation_matrix_from_snap (advanced)")
+    #print("compute_orientation_matrix_from_snap (advanced)")
     obj = snap_draw_state.target_obj
     index = snap_draw_state.target_face_index
     coords = snap_draw_state.coords
@@ -248,7 +248,7 @@ def create_orientation_using_matrix(self, context, matrix, name="TempSnap"):
         if slot.custom_orientation:
             slot.custom_orientation.matrix = matrix
             self.custom_orientation_name = name
-            print(f"[INFO] Transform Orientation '{name}' を作成しました")
+            #print(f"[INFO] Transform Orientation '{name}' を作成しました")
         else:
             print("[WARN] Transform Orientation は作成されたが取得できませんでした")
 
@@ -423,9 +423,10 @@ def draw_gizmo_help_text():
     
     lines = [
         "操作ガイド",
-        "・軸を選択:トランスフォーム座標系で変更",
-        "・Alt+左クリック：軸をカスタム",
-        "・Alt+右クリック：軸をリセット",
+        "・軸を選択",
+        "　・Alt+左クリック：軸をカスタム",
+        "　・Alt+右クリック：軸をリセット",
+        "　・トランスフォーム座標系により初期軸が設定されます",
         "・投影先を選択",
         "・Space/Enter：投影実行",
         "・ESC / 右クリック：キャンセル",
@@ -896,7 +897,7 @@ class ModalMeshProjectorOperator(bpy.types.Operator):
         global temp_gizmo_orientation_matrix
         if obj:
             temp_gizmo_orientation_matrix = get_orientation_matrix(context, obj)
-            print("[INFO] ギズモマトリクスをトランスフォーム座標系から初期化")
+            #print("[INFO] ギズモマトリクスをトランスフォーム座標系から初期化")
 
         gizmo_showing = True
         context.window_manager.modal_handler_add(self)
@@ -991,7 +992,7 @@ class ModalMeshProjectorOperator(bpy.types.Operator):
                 # alt + 左クリック → スナップからギズモマトリクス更新
                 mat = compute_orientation_matrix_from_snap(context)
                 if mat:
-                    print("[INFO] alt + 左クリック → ギズモマトリクスをスナップから更新")
+                    #print("[INFO] alt + 左クリック → ギズモマトリクスをスナップから更新")
                     temp_gizmo_orientation_matrix = mat
                     safe_tag_redraw(context)
                 else:
@@ -1014,7 +1015,7 @@ class ModalMeshProjectorOperator(bpy.types.Operator):
             obj = context.active_object
             if obj:
                 mat = get_orientation_matrix(context, obj)
-                print("[INFO] alt + 右クリック → 現在のトランスフォーム座標系をギズモに反映")
+                #print("[INFO] alt + 右クリック → 現在のトランスフォーム座標系をギズモに反映")
                 temp_gizmo_orientation_matrix = mat
                 safe_tag_redraw(context)
             else:
@@ -1175,7 +1176,7 @@ def project_mesh(context, axis):
             print(f"⚠ ターゲット処理失敗 ({target.name}):", e)
 
     if not all_bvhs:
-        print("⚠ BVHターゲットなし")
+        #print("⚠ BVHターゲットなし")
         return {'CANCELLED'}
 
     # === 投影元の頂点を更新（キャッシュ済みの選択頂点） ===
@@ -1291,7 +1292,7 @@ class ModalMouseTrackerOperator(bpy.types.Operator):
 
 def register_snap_draw_handler(area):
     global snap_draw_handler
-    print("register_snap_draw_handler")
+    #print("register_snap_draw_handler")
     if area is None:
         # VIEW_3Dエリアを明示的に探す
         for a in bpy.context.window.screen.areas:
